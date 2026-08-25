@@ -334,21 +334,79 @@ function extractRawDateText(cardText) {
   return match ? match[1].trim() : null;
 }
 
+// REAL BUG FOUND live 2026-08-25 (backfill diagnostic dump): Edsby's real
+// Date: field omits the year for recent dates ("Aug 25", confirmed via raw
+// rawDateText logging), and `new Date("Aug 25")` silently parses that as
+// year 2001 in this runtime -- not the current year. Every date comparison
+// downstream (the daily "is this today's date" check, and the backfill
+// range filter) was therefore silently excluding EVERY real card with a
+// year-less date, which is apparently Edsby's convention for anything
+// recent -- meaning every "no homework today" push sent before this fix
+// landed was very likely wrong, not a genuine empty result. Fixed by
+// explicitly inferring the year: try the current Karachi year first: if
+// that lands more than 2 days in the future (a real post/lesson date should
+// never be meaningfully after "now"), fall back to the previous year
+// instead, so a year-less date encountered deep in the feed's history isn't
+// silently mis-stamped onto the current year either.
 function parseEdsbyDate(cardText) {
   const raw = extractRawDateText(cardText);
   if (raw === null) return null;
-  const parsed = new Date(raw);
-  if (!Number.isNaN(parsed.getTime())) return karachiISODate(parsed);
-  // Fallback: strip a leading weekday name Date.parse sometimes chokes on
-  // in combination with other tokens (e.g. "Mon, Aug 25, 2026").
-  const stripped = raw.replace(/^[A-Za-z]{3,9},?\s*/, "");
-  const parsed2 = new Date(stripped);
-  return Number.isNaN(parsed2.getTime()) ? null : karachiISODate(parsed2);
+  if (/\b\d{4}\b/.test(raw)) {
+    // Explicit year present -- trust it directly, same as before.
+    const parsed = new Date(raw);
+    if (!Number.isNaN(parsed.getTime())) return karachiISODate(parsed);
+    // Fallback: strip a leading weekday name Date.parse sometimes chokes on
+    // in combination with other tokens (e.g. "Mon, Aug 25, 2026").
+    const stripped = raw.replace(/^[A-Za-z]{3,9},?\s*/, "");
+    const parsed2 = new Date(stripped);
+    return Number.isNaN(parsed2.getTime()) ? null : karachiISODate(parsed2);
+  }
+
+  const now = new Date();
+  const currentYear = Number(karachiISODate(now).slice(0, 4));
+  let firstParseAttempted = null;
+  for (const year of [currentYear, currentYear - 1]) {
+    const parsed = new Date(`${raw} ${year}`);
+    if (Number.isNaN(parsed.getTime())) continue;
+    if (firstParseAttempted === null) firstParseAttempted = parsed;
+    const daysInFuture = (parsed.getTime() - now.getTime()) / 86_400_000;
+    if (daysInFuture < 2) return karachiISODate(parsed);
+  }
+  // Both years either failed to parse or landed implausibly in the future --
+  // return the current-year attempt anyway if it at least parsed (a real
+  // card is better surfaced with a possibly-off-by-one-year date than
+  // silently dropped), never fabricate a date for genuinely unparseable text.
+  return firstParseAttempted ? karachiISODate(firstParseAttempted) : null;
 }
 
+// REAL BUG FOUND live 2026-08-25 (backfill diagnostic dump): every scanned
+// card's "subject" came back as the literal string "Topics Covered" -- the
+// section-header label, not the real course name (e.g. "7-K Mathematics").
+// This means nearestCardContainer's chosen ancestor apparently starts AT or
+// AFTER that label, i.e. the real subject heading lives outside the
+// container this scraper currently selects (still unconfirmed exactly
+// where -- no live DOM access at the time of this fix, see module
+// docstring). This fix does NOT solve that positioning problem (would need
+// live inspection to do properly); it narrows the damage by refusing to
+// silently mislabel a known SECTION heading as if it were the subject, so a
+// wrong guess is at least visibly "Unknown subject" rather than a
+// plausible-looking wrong answer. Re-check with the diagnostic logging in
+// backfill.js after this fix -- if "Unknown subject" shows up often, the
+// container-selection heuristic itself needs live-verified adjustment.
+const KNOWN_SECTION_HEADERS = /^(topics covered|to ?do|date:|attachments?)$/i;
+
 function extractSubject(cardText) {
-  const firstLine = cardText.split("\n").map((l) => l.trim()).find(Boolean);
-  return firstLine || "Unknown subject";
+  const lines = cardText.split("\n").map((l) => l.trim()).filter(Boolean);
+  if (!lines.length) return "Unknown subject";
+  const firstHeaderIdx = lines.findIndex((l) => KNOWN_SECTION_HEADERS.test(l));
+  // Only trust the first line if it appears BEFORE any known section
+  // header. If the very first non-empty line already IS a header (the
+  // real, confirmed 2026-08-25 case), there is genuinely no subject-looking
+  // line in this captured text at all, and grabbing whatever comes next
+  // would just mislabel real topics/to-do CONTENT as if it were a subject
+  // name -- worse than admitting we don't know.
+  if (firstHeaderIdx === 0) return "Unknown subject";
+  return lines[0];
 }
 
 function extractSection(cardText, headingPattern) {
