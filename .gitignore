@@ -1,0 +1,11 @@
+node_modules/
+.env
+diagnostics/
+
+# Playwright browser binaries / local caches (installed fresh in CI each run)
+/ms-playwright/
+.cache/
+
+# Generated dashboard output -- rebuilt fresh by the workflow every run and
+# deployed via the Pages artifact, never committed to the branch.
+docs/index.html
