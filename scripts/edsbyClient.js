@@ -209,6 +209,7 @@ export async function scrapeChildHomeworkRange(page, child, { fromISO, toISO, ma
     const seen = new Map(); // dedupe key -> card
     let oldestSeenISO = toISO;
     let clicks = 0;
+    let olderButtonEverFound = false;
 
     while (clicks < maxShowOlderClicks) {
       await collectVisibleCards(page, seen);
@@ -221,9 +222,24 @@ export async function scrapeChildHomeworkRange(page, child, { fromISO, toISO, ma
 
       if (oldestSeenISO && oldestSeenISO <= cutoffISO) break;
 
-      const olderButton = page.getByRole("button", { name: /show older posts?/i });
+      // NOT live-verified (unlike the login form -- see loginToEdsby's own
+      // note) -- this text pattern is a guess. Widened to a few plausible
+      // phrasings and to both button/link roles, and the outcome of this
+      // FIRST attempt is logged unconditionally below so a caller can tell
+      // "no more real posts exist" apart from "this selector never matched
+      // anything" -- never trust a silent 0-clicks result.
+      const olderButton = page
+        .getByRole("button", { name: /show (older|more)( posts?)?/i })
+        .or(page.getByRole("link", { name: /show (older|more)( posts?)?/i }))
+        .or(page.getByText(/show (older|more)( posts?)?/i));
       const hasMore = await olderButton.count();
+      if (clicks === 0) {
+        console.log(
+          `[scrapeChildHomeworkRange] "Show Older Posts"-style control ${hasMore ? "FOUND" : "NOT FOUND"} on first page load (matched ${hasMore} element(s)).`
+        );
+      }
       if (!hasMore) break;
+      olderButtonEverFound = true;
       const visible = await olderButton.first().isVisible().catch(() => false);
       if (!visible) break;
 
@@ -232,8 +248,14 @@ export async function scrapeChildHomeworkRange(page, child, { fromISO, toISO, ma
       await page.waitForLoadState("networkidle", { timeout: 5_000 }).catch(() => {});
       clicks++;
     }
+    if (!olderButtonEverFound && clicks === 0) {
+      console.log(
+        "[scrapeChildHomeworkRange] Never found a pagination control -- either the feed genuinely has no more posts to load, or the button text/selector doesn't match Edsby's real markup. Cannot currently tell these apart from here."
+      );
+    }
 
-    const cards = [...seen.values()]
+    const allCards = [...seen.values()];
+    const cards = allCards
       .filter((c) => c.dateISO && c.dateISO >= fromISO && c.dateISO <= toISO)
       .sort((a, b) => a.dateISO.localeCompare(b.dateISO));
 
@@ -246,7 +268,12 @@ export async function scrapeChildHomeworkRange(page, child, { fromISO, toISO, ma
           })
         : [];
 
-    return { cards, bellCrossCheck: bellCards, cardsScanned: seen.size, showOlderClicks: clicks };
+    // allCards is returned unfiltered/unsorted alongside the range-filtered
+    // `cards` specifically so a caller can log/inspect exactly what was
+    // scanned (subject, raw Date: text, parsed dateISO) for diagnosing a
+    // suspiciously-empty range result -- never trust a silent "0 in range"
+    // without being able to see what the scan actually found.
+    return { cards, allCards, bellCrossCheck: bellCards, cardsScanned: seen.size, showOlderClicks: clicks };
   } catch (err) {
     err.screenshotPath = await saveDiagnosticScreenshot(page, `scrape-failure-${child.id}`);
     throw err;
@@ -269,6 +296,7 @@ async function collectVisibleCards(page, seen) {
     if (!card) continue;
 
     const cardText = (await card.innerText().catch(() => "")) || "";
+    const rawDateText = extractRawDateText(cardText);
     const dateISO = parseEdsbyDate(cardText);
     const subject = extractSubject(cardText);
     const topics = extractSection(cardText, /topics covered/i);
@@ -277,7 +305,7 @@ async function collectVisibleCards(page, seen) {
 
     const key = `${subject}|${dateISO}|${cardText.slice(0, 120)}`;
     if (!seen.has(key)) {
-      seen.set(key, { subject, dateISO, topics, toDo, attachments, rawExcerpt: cardText.slice(0, 400) });
+      seen.set(key, { subject, dateISO, rawDateText, topics, toDo, attachments, rawExcerpt: cardText.slice(0, 400) });
     }
   }
 }
@@ -301,10 +329,14 @@ async function nearestCardContainer(dateLabelLocator) {
   return null;
 }
 
-function parseEdsbyDate(cardText) {
+function extractRawDateText(cardText) {
   const match = cardText.match(/date:\s*([^\n]+)/i);
-  if (!match) return null;
-  const raw = match[1].trim();
+  return match ? match[1].trim() : null;
+}
+
+function parseEdsbyDate(cardText) {
+  const raw = extractRawDateText(cardText);
+  if (raw === null) return null;
   const parsed = new Date(raw);
   if (!Number.isNaN(parsed.getTime())) return karachiISODate(parsed);
   // Fallback: strip a leading weekday name Date.parse sometimes chokes on

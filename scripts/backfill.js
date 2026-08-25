@@ -66,6 +66,17 @@ async function backfillOneChild(page, child) {
     `${child.name}: ${result.cards.length} card(s) in range, scanned ${result.cardsScanned} total across ${result.showOlderClicks} "show older" click(s).`
   );
 
+  // Full diagnostic dump of EVERY scanned card -- subject, the raw "Date:"
+  // text as Edsby actually rendered it, and what we parsed that into --
+  // so a suspiciously-empty range result is verifiable from the workflow
+  // log itself, not just a trust-me count.
+  console.log(`${child.name}: raw dump of all ${result.allCards.length} scanned card(s):`);
+  for (const c of result.allCards) {
+    console.log(
+      `  subject="${c.subject}" rawDate="${c.rawDateText}" parsedISO=${c.dateISO} toDo="${(c.toDo || "").slice(0, 60)}"`
+    );
+  }
+
   const dedupeKey = `backfill:${FROM_DATE}:${TO_DATE}`;
   const { alreadySent } = await checkAndRecord({
     childId: child.id,
