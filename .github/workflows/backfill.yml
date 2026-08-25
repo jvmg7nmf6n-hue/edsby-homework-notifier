@@ -1,0 +1,68 @@
+name: Edsby Homework Backfill Digest
+
+# One-off, manual-only: sends ONE consolidated ntfy push covering a date
+# range (not just "today"). Never runs on a schedule -- workflow_dispatch
+# only, with explicit from/to dates.
+
+on:
+  workflow_dispatch:
+    inputs:
+      from_date:
+        description: "Start date, YYYY-MM-DD (Asia/Karachi calendar date)"
+        required: true
+      to_date:
+        description: "End date, YYYY-MM-DD (defaults to today if left blank)"
+        required: false
+      dry_run:
+        description: "Dry run (print the ntfy payload instead of sending it)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write # to commit data/notified.json (backfill uses its own dedupe key)
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run backfill digest
+        env:
+          EDSBY_EMAIL: ${{ secrets.EDSBY_EMAIL }}
+          EDSBY_PASSWORD: ${{ secrets.EDSBY_PASSWORD }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NTFY_SERVER: ${{ secrets.NTFY_SERVER }}
+          NTFY_ALERTS_TOPIC: ${{ secrets.NTFY_ALERTS_TOPIC }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          FROM_DATE: ${{ github.event.inputs.from_date }}
+          TO_DATE: ${{ github.event.inputs.to_date }}
+        run: npm run backfill
+
+      - name: Upload failure screenshot (if any)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backfill-failure-diagnostics
+          path: diagnostics/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Commit updated dedupe data
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/notified.json
+          git diff --cached --quiet || git commit -m "Update backfill dedupe data [skip ci]"
+          git push

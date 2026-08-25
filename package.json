@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "check": "node scripts/run.js",
-    "check:dry": "DRY_RUN=true node scripts/run.js"
+    "check:dry": "DRY_RUN=true node scripts/run.js",
+    "backfill": "node scripts/backfill.js"
   },
   "engines": {
     "node": ">=20"

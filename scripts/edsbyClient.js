@@ -163,8 +163,36 @@ export async function loginToEdsby() {
 
 /** Navigates to a specific child's dashboard and returns every activity-feed
  * card whose Date: field falls within [todayISO - lookbackBufferDays, today].
- * Cross-checks the notifications bell as a secondary source. */
+ * Cross-checks the notifications bell as a secondary source. Thin wrapper
+ * around scrapeChildHomeworkRange (the daily job's own "just today" case) --
+ * see that function for a card whose Date: falls anywhere in an arbitrary
+ * range, e.g. for a one-off historical digest. */
 export async function scrapeChildHomework(page, child, { maxShowOlderClicks, lookbackBufferDays }) {
+  const todayISO = karachiISODate();
+  const result = await scrapeChildHomeworkRange(page, child, {
+    fromISO: todayISO,
+    toISO: todayISO,
+    maxShowOlderClicks,
+    lookbackBufferDays,
+  });
+  return {
+    todaysCards: result.cards,
+    bellCrossCheck: result.bellCrossCheck,
+    cardsScanned: result.cardsScanned,
+    showOlderClicks: result.showOlderClicks,
+  };
+}
+
+/** Navigates to a specific child's dashboard and returns every activity-feed
+ * card whose Date: field falls within [fromISO, toISO] (inclusive both
+ * ends). Pages back ("Show Older Posts") until the oldest card seen so far
+ * is at or before `fromISO` minus `lookbackBufferDays` of extra buffer (the
+ * feed is post-time ordered, not lesson-date ordered, so a small buffer past
+ * the requested range's own start is needed to be confident nothing in
+ * range was missed), or until `maxShowOlderClicks` is hit. Cross-checks the
+ * notifications bell as a secondary source (today's date only -- the bell
+ * dropdown doesn't meaningfully page back further). */
+export async function scrapeChildHomeworkRange(page, child, { fromISO, toISO, maxShowOlderClicks, lookbackBufferDays }) {
   try {
     await page.goto(child.dashboardUrl, { waitUntil: "domcontentloaded" });
     await page.waitForLoadState("networkidle", { timeout: NAV_TIMEOUT_MS }).catch(() => {});
@@ -176,11 +204,10 @@ export async function scrapeChildHomework(page, child, { maxShowOlderClicks, loo
       );
     });
 
-    const todayISO = karachiISODate();
-    const cutoffISO = karachiISODate(new Date(Date.now() - lookbackBufferDays * 86_400_000));
+    const cutoffISO = karachiISODate(new Date(`${fromISO}T00:00:00Z`).getTime() - lookbackBufferDays * 86_400_000);
 
     const seen = new Map(); // dedupe key -> card
-    let oldestSeenISO = todayISO;
+    let oldestSeenISO = toISO;
     let clicks = 0;
 
     while (clicks < maxShowOlderClicks) {
@@ -206,14 +233,20 @@ export async function scrapeChildHomework(page, child, { maxShowOlderClicks, loo
       clicks++;
     }
 
-    const todaysCards = [...seen.values()].filter((c) => c.dateISO === todayISO);
+    const cards = [...seen.values()]
+      .filter((c) => c.dateISO && c.dateISO >= fromISO && c.dateISO <= toISO)
+      .sort((a, b) => a.dateISO.localeCompare(b.dateISO));
 
-    const bellCards = await scrapeNotificationBell(page, todayISO).catch((err) => {
-      console.warn(`Notification-bell cross-check failed (non-fatal): ${err.message}`);
-      return [];
-    });
+    const todayISO = karachiISODate();
+    const bellCards =
+      toISO >= todayISO
+        ? await scrapeNotificationBell(page, todayISO).catch((err) => {
+            console.warn(`Notification-bell cross-check failed (non-fatal): ${err.message}`);
+            return [];
+          })
+        : [];
 
-    return { todaysCards, bellCrossCheck: bellCards, cardsScanned: seen.size, showOlderClicks: clicks };
+    return { cards, bellCrossCheck: bellCards, cardsScanned: seen.size, showOlderClicks: clicks };
   } catch (err) {
     err.screenshotPath = await saveDiagnosticScreenshot(page, `scrape-failure-${child.id}`);
     throw err;
