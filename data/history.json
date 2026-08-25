@@ -3,8 +3,8 @@
     "2026-08-25": {
       "status": "failed",
       "cards": [],
-      "error": "Could not find an email/username field on the Edsby login page -- the login form's structure has likely changed.",
-      "updatedAt": "2026-08-25T08:43:42.887Z"
+      "error": "Could not find the Username field on the Edsby login page -- the login form's structure has likely changed from what was live-verified on 2026-08-25.",
+      "updatedAt": "2026-08-25T08:55:02.888Z"
     }
   }
 }
