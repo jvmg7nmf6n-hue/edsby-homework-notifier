@@ -86,34 +86,45 @@ export async function loginToEdsby() {
     // can't also match that Google link.
     await page.goto(config.edsby.baseUrl, { waitUntil: "domcontentloaded" });
 
+    // Edsby is a heavy SPA (see module docstring) -- domcontentloaded fires
+    // before the login form is necessarily hydrated/rendered. The FIRST
+    // attempt at this fix used a custom findFirstVisible() helper whose
+    // `.count()`/`.isVisible()` checks are synchronous snapshots with no
+    // retry, so it gave up immediately if the form hadn't rendered yet by
+    // that exact millisecond -- confirmed as the real cause of a second
+    // real failed run (same error, even with the correct selector), not a
+    // wrong-selector problem. Fixed by using a single combined locator
+    // (`.or()`) and Playwright's own real auto-waiting `.waitFor()`/`.fill()`
+    // (which retry internally up to ACTION_TIMEOUT_MS), never a manual
+    // one-shot check.
+
     // Username field: type="text", placeholder="Username" (labeled
     // "Username" even though an email address is what's actually typed in),
     // name="login-userid". Its `id` has a numeric prefix regenerated per
     // page load (e.g. "2loginform-login-userid__f__") -- never select by id.
-    const usernameField = await findFirstVisible(page, [
-      () => page.getByPlaceholder("Username"),
-      () => page.locator('input[name="login-userid"]'),
-    ]);
-    if (!usernameField) {
+    const usernameField = page.getByPlaceholder("Username").or(page.locator('input[name="login-userid"]'));
+    try {
+      await usernameField.first().waitFor({ state: "visible", timeout: NAV_TIMEOUT_MS });
+    } catch {
       throw new EdsbySelectorError(
-        "Could not find the Username field on the Edsby login page -- the login form's structure has likely changed from what was live-verified on 2026-08-25."
+        "Could not find the Username field on the Edsby login page (waited " +
+          `${NAV_TIMEOUT_MS}ms) -- the login form's structure has likely changed from what was live-verified on 2026-08-25.`
       );
     }
-    await usernameField.fill(config.edsby.email);
+    await usernameField.first().fill(config.edsby.email);
 
     // Password field: type="password", placeholder="Password", `name` is
     // empty on this field (confirmed) -- select by placeholder/type only,
     // never by name.
-    const passwordField = await findFirstVisible(page, [
-      () => page.getByPlaceholder("Password"),
-      () => page.locator('input[type="password"]'),
-    ]);
-    if (!passwordField) {
+    const passwordField = page.getByPlaceholder("Password").or(page.locator('input[type="password"]'));
+    try {
+      await passwordField.first().waitFor({ state: "visible", timeout: ACTION_TIMEOUT_MS });
+    } catch {
       throw new EdsbySelectorError(
         "Could not find the Password field on the Edsby login page -- the login form's structure has likely changed from what was live-verified on 2026-08-25."
       );
     }
-    await passwordField.fill(config.edsby.password);
+    await passwordField.first().fill(config.edsby.password);
 
     // Submit is a real <input type="submit"> (id has the same unstable
     // numeric-prefix issue as the username field's id, so it's deliberately
@@ -121,7 +132,9 @@ export async function loginToEdsby() {
     // (a role-based name match risks the same "Log in using Google" link
     // collision the earlier landing-page step hit).
     const submitButton = page.locator('input[type="submit"]');
-    if (!(await submitButton.count())) {
+    try {
+      await submitButton.first().waitFor({ state: "visible", timeout: ACTION_TIMEOUT_MS });
+    } catch {
       throw new EdsbySelectorError(
         "Could not find the login submit input on the Edsby login page -- the login form's structure has likely changed from what was live-verified on 2026-08-25."
       );
@@ -146,18 +159,6 @@ export async function loginToEdsby() {
     }
     throw err;
   }
-}
-
-async function findFirstVisible(page, locatorFactories) {
-  for (const factory of locatorFactories) {
-    const locator = factory();
-    const count = await locator.count().catch(() => 0);
-    for (let i = 0; i < count; i++) {
-      const candidate = locator.nth(i);
-      if (await candidate.isVisible().catch(() => false)) return candidate;
-    }
-  }
-  return null;
 }
 
 /** Navigates to a specific child's dashboard and returns every activity-feed

@@ -54,7 +54,13 @@ jobs:
         run: npm run check
 
       - name: Upload failure screenshot (if any)
-        if: failure()
+        # NOT if: failure() -- a check failure (bad login/selector) is caught
+        # and handled inside run.js itself (so the ntfy alert can fire and
+        # the dashboard/history commit can still happen), so the job step
+        # normally reports success even when a screenshot WAS saved. Always
+        # attempt the upload; if-no-files-found: ignore makes this a no-op
+        # on a genuinely clean run.
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: failure-diagnostics
