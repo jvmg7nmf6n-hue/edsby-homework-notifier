@@ -1,15 +1,22 @@
 // Playwright-driven Edsby scraper. Edsby is a heavy SPA with a virtualized
 // activity feed -- plain fetch/HTML scraping doesn't work (see README).
 //
-// HONEST LIMITATION, disclosed up front: the exact login form and activity-
-// feed DOM were described from a manual browsing session, not captured live
-// by this script's own author. Every selector below is written defensively
-// (role/text-based Playwright locators, multiple fallback strategies, no
-// brittle nth-child/class-name chains) per the project's own design
-// constraint, but the FIRST real `dry_run` (see README's Testing section) is
-// what actually validates them against the live site. Any selector that
-// fails should throw a clear, specific error (never silently return empty
-// data) so the ntfy failure alert names the real problem.
+// VERIFICATION STATUS, kept honest and current:
+//   - loginToEdsby(): selectors LIVE-VERIFIED 2026-08-25 against a real
+//     logged-out session on headstart.edsby.com (see git history for the
+//     fix this replaced -- the first version guessed a "click a Login-ish
+//     link" step that turned out to also match the page's own "Log in using
+//     Google" link, which is exactly the class of bug this note exists to
+//     prevent silently reintroducing).
+//   - scrapeChildHomework() and its helpers: still NOT independently
+//     live-verified -- described from a manual browsing session, not
+//     captured field-by-field. Written defensively (role/text-based
+//     Playwright locators, multiple fallback strategies, no brittle
+//     nth-child/class-name chains) per the project's own design constraint,
+//     but the first real `dry_run` against the activity feed (see README's
+//     Testing section) is what actually validates these. Any selector that
+//     fails should throw a clear, specific error (never silently return
+//     empty data) so the ntfy failure alert names the real problem.
 
 import { chromium } from "playwright";
 import { config } from "./config.js";
@@ -64,108 +71,80 @@ export async function loginToEdsby() {
   const page = await context.newPage();
 
   try {
+    // Live-inspected, confirmed 2026-08-25 (logged-out session against the
+    // real headstart.edsby.com tenant): navigating to the base URL redirects
+    // straight to a single username/password form at /p/BasePublic/ -- no
+    // separate marketing/landing page, no district/board picker, no MFA
+    // step. An EARLIER version of this function tried to click a "Login"
+    // link/button on the landing page first, matched on a loose /log ?in/i
+    // name regex -- that regex also matches this page's own "Log in using
+    // Google" OAuth link's accessible name, which is why the very first
+    // real run clicked into Google's OAuth flow instead of ever reaching
+    // this form. Fixed by removing that step entirely and going straight
+    // for the real, confirmed field selectors below -- do not reintroduce a
+    // generic "find and click a login-ish link" step without checking it
+    // can't also match that Google link.
     await page.goto(config.edsby.baseUrl, { waitUntil: "domcontentloaded" });
 
-    // Step 1: find and click into the login flow from the marketing/landing
-    // page. Try several common phrasings -- "Login", "Log In", "Sign In".
-    const loginEntry = page
-      .getByRole("link", { name: /log ?in|sign ?in/i })
-      .or(page.getByRole("button", { name: /log ?in|sign ?in/i }));
-    if (await loginEntry.count()) {
-      await loginEntry.first().click();
-    }
-    // else: some districts land directly on a login form with no separate
-    // marketing page -- fall through and look for the form directly.
-
-    await page.waitForLoadState("domcontentloaded");
-
-    // Step 2: fill the email/username field. Edsby's own docs describe a
-    // possible district/board picker BEFORE the credential form on some
-    // instances -- if we see a district/board selector instead of a
-    // credential field, this school's flow needs it, so handle it generically:
-    // look for a select/combobox first, and if present, choose the option
-    // that best matches "Headstart" before continuing.
-    await maybeHandleDistrictPicker(page);
-
-    const emailField = await findFirstVisible(page, [
-      () => page.getByLabel(/e-?mail|username|user ?id/i),
-      () => page.getByPlaceholder(/e-?mail|username/i),
-      () => page.locator('input[type="email"]'),
-      () => page.locator('input[name*="email" i], input[name*="user" i]'),
+    // Username field: type="text", placeholder="Username" (labeled
+    // "Username" even though an email address is what's actually typed in),
+    // name="login-userid". Its `id` has a numeric prefix regenerated per
+    // page load (e.g. "2loginform-login-userid__f__") -- never select by id.
+    const usernameField = await findFirstVisible(page, [
+      () => page.getByPlaceholder("Username"),
+      () => page.locator('input[name="login-userid"]'),
     ]);
-    if (!emailField) {
+    if (!usernameField) {
       throw new EdsbySelectorError(
-        "Could not find an email/username field on the Edsby login page -- the login form's structure has likely changed."
+        "Could not find the Username field on the Edsby login page -- the login form's structure has likely changed from what was live-verified on 2026-08-25."
       );
     }
-    await emailField.fill(config.edsby.email);
+    await usernameField.fill(config.edsby.email);
 
-    // Some SSO-style flows require submitting the email first (a "Next"
-    // button) before the password field even renders.
-    const nextButton = page.getByRole("button", { name: /^next$|continue/i });
-    if (await nextButton.count()) {
-      await nextButton.first().click();
-      await page.waitForLoadState("domcontentloaded");
-    }
-
+    // Password field: type="password", placeholder="Password", `name` is
+    // empty on this field (confirmed) -- select by placeholder/type only,
+    // never by name.
     const passwordField = await findFirstVisible(page, [
-      () => page.getByLabel(/password/i),
-      () => page.getByPlaceholder(/password/i),
+      () => page.getByPlaceholder("Password"),
       () => page.locator('input[type="password"]'),
     ]);
     if (!passwordField) {
       throw new EdsbySelectorError(
-        "Could not find a password field on the Edsby login page (after filling email) -- the login flow's structure has likely changed, or it needs an extra step this script doesn't handle yet."
+        "Could not find the Password field on the Edsby login page -- the login form's structure has likely changed from what was live-verified on 2026-08-25."
       );
     }
     await passwordField.fill(config.edsby.password);
 
-    const submitButton = page
-      .getByRole("button", { name: /log ?in|sign ?in|submit/i })
-      .or(page.locator('button[type="submit"], input[type="submit"]'));
-    if (await submitButton.count()) {
-      await Promise.all([
-        page.waitForLoadState("networkidle", { timeout: NAV_TIMEOUT_MS }).catch(() => {}),
-        submitButton.first().click(),
-      ]);
-    } else {
-      // Fall back to submitting the form via Enter if no explicit button is found.
-      await passwordField.press("Enter");
-      await page.waitForLoadState("networkidle", { timeout: NAV_TIMEOUT_MS }).catch(() => {});
-    }
-
-    // Step 3: confirm we actually landed in an authenticated parent area --
-    // Edsby parent URLs contain "/p/". If we're still on a login-looking
-    // page (password field still visible), the credentials were rejected or
-    // an unhandled extra step exists.
-    const stillOnLogin = await page.locator('input[type="password"]').count();
-    if (stillOnLogin > 0 && !/\/p\//.test(page.url())) {
+    // Submit is a real <input type="submit"> (id has the same unstable
+    // numeric-prefix issue as the username field's id, so it's deliberately
+    // not used here), not a <button> -- select by type, not by role/name
+    // (a role-based name match risks the same "Log in using Google" link
+    // collision the earlier landing-page step hit).
+    const submitButton = page.locator('input[type="submit"]');
+    if (!(await submitButton.count())) {
       throw new EdsbySelectorError(
-        "Login did not appear to succeed -- still on a page with a password field after submitting. Check EDSBY_EMAIL/EDSBY_PASSWORD secrets, or the login flow may have an extra step (MFA, district picker) this script doesn't handle."
+        "Could not find the login submit input on the Edsby login page -- the login form's structure has likely changed from what was live-verified on 2026-08-25."
       );
     }
+    await Promise.all([
+      page.waitForURL(/\/p\/BaseParent\//, { timeout: NAV_TIMEOUT_MS }),
+      submitButton.first().click(),
+    ]);
 
     return { browser, context, page };
   } catch (err) {
+    // Capture everything from the still-open page BEFORE closing the
+    // browser -- page.url()/screenshot() are unusable once it's closed.
+    const urlAtFailure = page.url();
     err.screenshotPath = await saveDiagnosticScreenshot(page, "login-failure");
     await browser.close().catch(() => {});
+    if (err.name === "TimeoutError") {
+      throw new EdsbySelectorError(
+        `Login form was submitted but the page never navigated to /p/BaseParent/... (stayed at ${urlAtFailure}) -- ` +
+          "check EDSBY_EMAIL/EDSBY_PASSWORD secrets are correct, or the login flow may have changed."
+      );
+    }
     throw err;
-  }
-}
-
-async function maybeHandleDistrictPicker(page) {
-  const picker = page.getByRole("combobox").or(page.locator("select"));
-  if (!(await picker.count())) return;
-  const el = picker.first();
-  const visible = await el.isVisible().catch(() => false);
-  if (!visible) return;
-  try {
-    await el.selectOption({ label: /headstart/i });
-  } catch {
-    // Not a real <select>, or no matching option -- likely wasn't a
-    // district picker at all (could be an unrelated dropdown on the
-    // landing page). Non-fatal: proceed and let the email-field lookup
-    // below succeed or fail on its own merits.
   }
 }
 
