@@ -1,62 +1,137 @@
-// Central place every script reads its configuration from. Secrets come only
-// from environment variables (GitHub Actions secrets in CI, a local .env for
-// manual testing -- see .env.example) -- never hardcoded, never logged.
+// Runtime configuration. Personal identifiers and credentials are deliberately
+// environment-only so the code can safely live in a public repository.
 
-function required(name, { allowEmptyInDryRun = false } = {}) {
-  const value = process.env[name];
+function required(name) {
+  const value = process.env[name]?.trim();
   if (value) return value;
-  if (allowEmptyInDryRun && isDryRun()) return "";
   throw new Error(`Missing required environment variable: ${name}`);
 }
 
+function bool(name, fallback = false) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  if (/^(1|true|yes|on)$/i.test(raw)) return true;
+  if (/^(0|false|no|off)$/i.test(raw)) return false;
+  throw new Error(`${name} must be true or false`);
+}
+
+function integer(name, fallback, { min, max }) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+    throw new Error(`${name} must be an integer from ${min} to ${max}`);
+  }
+  return parsed;
+}
+
+let childrenCache;
+let edsbyPrivateCache;
+function edsbyPrivate() {
+  if (edsbyPrivateCache) return edsbyPrivateCache;
+  const raw = process.env.EDSBY_CONFIG_JSON?.trim();
+  if (!raw) return (edsbyPrivateCache = {});
+  try {
+    return (edsbyPrivateCache = JSON.parse(raw));
+  } catch (error) {
+    throw new Error(`EDSBY_CONFIG_JSON must be valid JSON: ${error.message}`);
+  }
+}
+
+function children() {
+  if (childrenCache) return childrenCache;
+  let parsed;
+  try {
+    parsed = edsbyPrivate().children || JSON.parse(required("EDSBY_CHILDREN_JSON"));
+  } catch (error) {
+    throw new Error(`EDSBY_CHILDREN_JSON must be valid JSON: ${error.message}`);
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    throw new Error("EDSBY_CHILDREN_JSON must be a non-empty JSON array");
+  }
+  childrenCache = parsed.map((child, index) => {
+    for (const field of ["id", "name", "grade", "dashboardUrl"]) {
+      if (!String(child?.[field] || "").trim()) {
+        throw new Error(`EDSBY_CHILDREN_JSON[${index}].${field} is required`);
+      }
+    }
+    return {
+      id: String(child.id),
+      name: String(child.name),
+      grade: String(child.grade),
+      dashboardUrl: String(child.dashboardUrl),
+    };
+  });
+  return childrenCache;
+}
+
 export function isDryRun() {
-  return String(process.env.DRY_RUN || "").toLowerCase() === "true";
+  return process.argv.includes("--dry-run") || bool("DRY_RUN", false);
 }
 
 export const config = {
   edsby: {
-    baseUrl: "https://headstart.edsby.com",
-    parentHomeUrl: "https://headstart.edsby.com/p/BaseParent/210220381",
-    // Config LIST (not a single hardcoded child) so a second child can be
-    // added later without touching any scraping/notification code -- see
-    // README's "supporting a second child" note.
-    children: [
-      {
-        id: "210215645",
-        name: "Muhammad Bin Salman",
-        grade: "7-K",
-        dashboardUrl: "https://headstart.edsby.com/p/BaseParentChild/210215645",
-      },
-    ],
+    get enabled() {
+      return bool("EDSBY_ENABLED", true);
+    },
+    get baseUrl() {
+      const value = process.env.EDSBY_BASE_URL?.trim() || edsbyPrivate().baseUrl;
+      if (value) return value;
+      if (this.enabled) return required("EDSBY_BASE_URL");
+      return "";
+    },
+    get parentHomeUrl() {
+      return process.env.EDSBY_PARENT_HOME_URL?.trim() || edsbyPrivate().parentHomeUrl || this.baseUrl || children()[0].dashboardUrl;
+    },
+    get children() {
+      return children();
+    },
     get email() {
-      // Required even in dry_run: dry_run only mocks the ntfy SEND step, it
-      // still performs a real Edsby login/scrape (that's the whole point --
-      // "verify a fresh setup... works end-to-end before trusting it to run
-      // unattended").
       return required("EDSBY_EMAIL");
     },
     get password() {
       return required("EDSBY_PASSWORD");
     },
   },
-  ntfy: {
-    get server() {
-      return process.env.NTFY_SERVER || "https://ntfy.sh";
+  gmail: {
+    get enabled() {
+      return bool("GMAIL_ENABLED", false);
     },
-    get topic() {
-      return required("NTFY_TOPIC", { allowEmptyInDryRun: true }) || "dry-run-topic";
+    get accountEmail() {
+      return required("GMAIL_ACCOUNT_EMAIL");
     },
-    get alertsTopic() {
-      // Falls back to the same topic if a dedicated alerts topic isn't set --
-      // still every failure gets a real push, just not separated out.
-      return process.env.NTFY_ALERTS_TOPIC || this.topic;
+    get clientId() {
+      return required("GMAIL_CLIENT_ID");
+    },
+    get clientSecret() {
+      return required("GMAIL_CLIENT_SECRET");
+    },
+    get refreshToken() {
+      return required("GMAIL_REFRESH_TOKEN");
+    },
+    get query() {
+      return required("GMAIL_QUERY");
+    },
+    get childId() {
+      return process.env.GMAIL_CHILD_ID?.trim() || children()[0].id;
+    },
+    get maxMessages() {
+      return integer("GMAIL_MAX_MESSAGES", 25, { min: 1, max: 50 });
     },
   },
-  // How many days of history the dashboard's "recent" strip shows.
-  dashboardHistoryDays: 14,
-  // Safety cap on "Show Older Posts" clicks -- the feed is post-time, not
-  // lesson-date, ordered, so we page back until we've covered this many
-  // calendar days of buffer past today, or hit this cap, whichever first.
-  maxShowOlderClicks: 30,
-  lookbackBufferDays: 3,
+  ntfy: {
+    get server() {
+      return process.env.NTFY_SERVER?.trim() || "https://ntfy.sh";
+    },
+    get topic() {
+      if (isDryRun()) return process.env.NTFY_TOPIC?.trim() || "dry-run-topic";
+      return required("NTFY_TOPIC");
+    },
+    get alertsTopic() {
+      return process.env.NTFY_ALERTS_TOPIC?.trim() || this.topic;
+    },
+  },
+  dashboardHistoryDays: integer("DASHBOARD_HISTORY_DAYS", 14, { min: 1, max: 90 }),
+  maxShowOlderClicks: integer("MAX_SHOW_OLDER_CLICKS", 20, { min: 0, max: 60 }),
+  lookbackBufferDays: integer("LOOKBACK_BUFFER_DAYS", 3, { min: 0, max: 14 }),
 };

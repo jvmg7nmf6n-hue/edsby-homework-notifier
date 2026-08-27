@@ -1,148 +1,205 @@
-// Entry point (`npm run check` / `npm run check:dry`). Decides the
-// Sunday-reminder vs Mon-Fri-full-check branch off the real Asia/Karachi
-// calendar date -- the GitHub Actions cron already excludes Saturday at the
-// schedule level (see .github/workflows/homework-check.yml), so Saturday
-// never reaches this script at all in the scheduled path; workflow_dispatch
-// can still trigger it manually any day, in which case Saturday falls
-// through the same weekday switch as any other non-Sunday, non-explicitly-
-// handled day and gets the reminder-only treatment rather than a scrape,
-// since there is deliberately no Saturday homework to check.
-
 import { config, isDryRun } from "./config.js";
-import { karachiISODate, karachiWeekday, karachiPretty } from "./karachiTime.js";
+import { karachiISODate, karachiPretty, karachiWeekday } from "./karachiTime.js";
 import { loginToEdsby, scrapeChildHomework } from "./edsbyClient.js";
-import { sendNtfy, sendFailureAlert } from "./ntfy.js";
-import { checkAndRecord } from "./dedupe.js";
-import { recordDay, STATUS_OK, STATUS_NONE, STATUS_FAILED, STATUS_SKIPPED } from "./history.js";
+import { fetchSchoolEmails } from "./gmailClient.js";
+import { sendFailureAlert, sendNtfy } from "./ntfy.js";
+import { checkSent, recordSent } from "./dedupe.js";
+import {
+  recordDay,
+  STATUS_FAILED,
+  STATUS_NONE,
+  STATUS_OK,
+  STATUS_PARTIAL,
+  STATUS_SKIPPED,
+} from "./history.js";
 import { generateDashboard } from "./dashboard.js";
+import { getState, saveState } from "./stateStore.js";
+
+function cleanCard(card) {
+  return {
+    source: card.source || "edsby",
+    sourceId: card.sourceId || undefined,
+    subject: String(card.subject || "Unknown subject").trim(),
+    topics: String(card.topics || "").trim(),
+    toDo: String(card.toDo || "").trim(),
+    attachments: [...new Set(card.attachments || [])].sort(),
+    dateISO: card.dateISO || null,
+    receivedAt: card.receivedAt || undefined,
+    url: card.url || undefined,
+  };
+}
+
+function stableCards(cards) {
+  return cards.map(cleanCard).sort((a, b) =>
+    [a.dateISO, a.source, a.subject, a.toDo].join("|").localeCompare([b.dateISO, b.source, b.subject, b.toDo].join("|"))
+  );
+}
 
 async function main() {
-  const dryRun = isDryRun();
   const weekday = karachiWeekday();
   const todayISO = karachiISODate();
+  const children = config.edsby.children;
+  await getState(); // fail early if the encrypted state key is missing/wrong
+  let sourceIssues = false;
 
-  console.log(`Run starting. Asia/Karachi date: ${todayISO} (${weekday}). dry_run=${dryRun}`);
-
-  if (weekday === "Sunday") {
-    await runSundayReminder();
-  } else {
-    await runFullCheck({ todayISO });
+  console.log(`Run starting. Asia/Karachi date: ${todayISO} (${weekday}). dry_run=${isDryRun()}`);
+  try {
+    if (weekday === "Sunday") {
+      await runReminderDay(children, todayISO, "Sunday");
+    } else if (weekday === "Saturday") {
+      await runReminderDay(children, todayISO, "Saturday");
+    } else {
+      sourceIssues = await runFullCheck(children, todayISO);
+    }
+  } finally {
+    await saveState();
+    await generateDashboard();
+    console.log("Encrypted state and dashboard regenerated.");
   }
-
-  await generateDashboard();
-  console.log("Dashboard regenerated.");
+  if (sourceIssues) {
+    console.error("One or more configured sources failed; results were saved as partial/failed.");
+    process.exitCode = 2;
+  }
 }
 
-async function runSundayReminder() {
-  await sendNtfy({
-    title: "Homework Reminder (Sunday)",
-    body: "Make sure any pending homework from the week is completed before Monday.",
-    clickUrl: config.edsby.parentHomeUrl,
-    tags: ["books"],
-  });
-  for (const child of config.edsby.children) {
-    await recordDay({ childId: child.id, date: karachiISODate(), status: STATUS_SKIPPED });
+async function runReminderDay(children, todayISO, weekday) {
+  for (const child of children) {
+    const payload = { status: STATUS_SKIPPED, weekday };
+    const dedupe = await checkSent({ childId: child.id, date: todayISO, payload });
+    await recordDay({ childId: child.id, date: todayISO, status: STATUS_SKIPPED });
+    if (dedupe.alreadySent) continue;
+    await sendNtfy({
+      title: `Homework reminder (${weekday})`,
+      body: "Please review pending homework and upcoming school notices together.",
+      clickUrl: config.edsby.parentHomeUrl,
+      tags: ["books"],
+    });
+    if (!isDryRun()) await recordSent(dedupe);
   }
 }
 
-async function runFullCheck({ todayISO }) {
+function outcomeMap(children) {
+  return new Map(children.map((child) => [child.id, { child, cards: [], errors: [], successfulSources: 0 }]));
+}
+
+async function collectEdsby(outcomes, todayISO) {
+  if (!config.edsby.enabled) return;
   let session;
   try {
     session = await loginToEdsby();
-  } catch (err) {
-    // edsbyClient.js's own catch already saved a diagnostic screenshot
-    // (if the page was still open) and attached its path to the error.
-    await handleChildFailure(config.edsby.children, todayISO, err, "login");
+  } catch (error) {
+    for (const outcome of outcomes.values()) outcome.errors.push(new Error(`Edsby: ${error.message}`));
     return;
   }
 
   const { page, browser } = session;
   try {
-    for (const child of config.edsby.children) {
-      await checkOneChild(page, child, todayISO);
+    for (const outcome of outcomes.values()) {
+      try {
+        const result = await scrapeChildHomework(page, outcome.child, {
+          maxShowOlderClicks: config.maxShowOlderClicks,
+          lookbackBufferDays: config.lookbackBufferDays,
+        });
+        outcome.cards.push(...result.todaysCards);
+        outcome.successfulSources++;
+        console.log(
+          `${outcome.child.name}: Edsby found ${result.todaysCards.length} item(s); scanned ${result.cardsScanned} card(s) with ${result.showOlderClicks} pagination click(s).`
+        );
+      } catch (error) {
+        outcome.errors.push(new Error(`Edsby: ${error.message}`));
+      }
     }
   } finally {
     await browser.close().catch(() => {});
   }
 }
 
-async function checkOneChild(page, child, todayISO) {
-  let result;
+async function collectGmail(outcomes, todayISO) {
+  if (!config.gmail.enabled) return;
+  const target = outcomes.get(config.gmail.childId);
+  if (!target) throw new Error("GMAIL_CHILD_ID does not match a configured child");
   try {
-    result = await scrapeChildHomework(page, child, {
-      maxShowOlderClicks: config.maxShowOlderClicks,
-      lookbackBufferDays: config.lookbackBufferDays,
-    });
-  } catch (err) {
-    await handleChildFailure([child], todayISO, err, `scrape (${child.name})`);
-    return;
+    const cards = await fetchSchoolEmails({ fromISO: todayISO, toISO: todayISO });
+    target.cards.push(...cards);
+    target.successfulSources++;
+    console.log(`${target.child.name}: Gmail found ${cards.length} matching message(s).`);
+  } catch (error) {
+    target.errors.push(new Error(`Gmail: ${error.message}`));
   }
-
-  const { todaysCards } = result;
-  const status = todaysCards.length ? STATUS_OK : STATUS_NONE;
-
-  await recordDay({ childId: child.id, date: todayISO, status, cards: todaysCards });
-
-  const { alreadySent } = await checkAndRecord({
-    childId: child.id,
-    date: todayISO,
-    payload: todaysCards,
-    dryRun: isDryRun(),
-  });
-
-  if (alreadySent) {
-    console.log(`${child.name}: content for ${todayISO} already notified (hash match) -- skipping ntfy push.`);
-    return;
-  }
-
-  await sendNtfy(buildHomeworkNotification(child, todayISO, todaysCards));
-  console.log(
-    `${child.name}: ${todaysCards.length} subject(s) today, scanned ${result.cardsScanned} card(s) across ${result.showOlderClicks} "show older" click(s).`
-  );
 }
 
-function buildHomeworkNotification(child, todayISO, cards) {
-  const pretty = karachiPretty(new Date(`${todayISO}T00:00:00Z`));
-  if (!cards.length) {
-    return {
-      title: `No new homework today (${pretty})`,
-      body: `Checked ${child.name}'s Edsby feed -- nothing dated today.`,
-      clickUrl: child.dashboardUrl,
-      tags: ["books"],
-    };
+async function runFullCheck(children, todayISO) {
+  if (!config.edsby.enabled && !config.gmail.enabled) throw new Error("At least one source (Edsby or Gmail) must be enabled");
+  const outcomes = outcomeMap(children);
+  if (config.gmail.enabled && !outcomes.has(config.gmail.childId)) {
+    throw new Error("GMAIL_CHILD_ID does not match a configured child");
   }
-  const body = cards
-    .map((c) => {
-      const lines = [`${c.subject}`];
-      if (c.topics) lines.push(`  Topics: ${c.topics}`);
-      if (c.toDo) lines.push(`  To do: ${c.toDo}`);
-      if (c.attachments?.length) lines.push(`  Attachments: ${c.attachments.join(", ")}`);
-      return lines.join("\n");
-    })
-    .join("\n\n");
 
+  // Gmail and browser scraping are independent, so overlap their network time.
+  await Promise.all([collectEdsby(outcomes, todayISO), collectGmail(outcomes, todayISO)]);
+
+  for (const outcome of outcomes.values()) await finishChild(outcome, todayISO);
+  return [...outcomes.values()].some((outcome) => outcome.errors.length > 0);
+}
+
+async function finishChild(outcome, todayISO) {
+  const cards = stableCards(outcome.cards);
+  const status = outcome.errors.length
+    ? outcome.successfulSources > 0
+      ? STATUS_PARTIAL
+      : STATUS_FAILED
+    : cards.length
+      ? STATUS_OK
+      : STATUS_NONE;
+  const payload = { status, cards, errors: outcome.errors.map((error) => error.message) };
+
+  await recordDay({ childId: outcome.child.id, date: todayISO, status, cards, errors: outcome.errors });
+  const dedupe = await checkSent({ childId: outcome.child.id, date: todayISO, payload });
+  if (dedupe.alreadySent) {
+    console.log(`${outcome.child.name}: identical ${todayISO} update already sent.`);
+    return;
+  }
+
+  await sendNtfy(buildNotification(outcome.child, todayISO, status, cards, outcome.errors));
+  if (!isDryRun()) await recordSent(dedupe);
+}
+
+export function buildNotification(child, todayISO, status, cards, errors = []) {
+  const pretty = karachiPretty(new Date(`${todayISO}T00:00:00Z`));
+  const sourceSummary = [...new Set(cards.map((card) => card.source))].join(" + ");
+  const body = [];
+  if (status === STATUS_FAILED) body.push("No school data could be collected.");
+  else if (!cards.length) body.push("No new matching homework, progress, or announcement items were found.");
+  else {
+    for (const card of cards) {
+      body.push(`[${card.source === "gmail" ? "Gmail" : "Edsby"}] ${card.subject}`);
+      if (card.topics) body.push(`  ${card.topics}`);
+      if (card.toDo) body.push(`  ${card.toDo}`);
+      if (card.attachments?.length) body.push(`  Attachments: ${card.attachments.join(", ")}`);
+      body.push("");
+    }
+  }
+  if (errors.length) {
+    body.push("Partial check warning:");
+    for (const error of errors) body.push(`- ${error.message}`);
+  }
   return {
-    title: `${child.name} -- Homework for ${pretty}`,
-    body,
+    title:
+      status === STATUS_FAILED
+        ? `School check failed (${pretty})`
+        : `${child.name} — ${cards.length} school update${cards.length === 1 ? "" : "s"} (${pretty})`,
+    body: body.join("\n").trim(),
     clickUrl: child.dashboardUrl,
-    tags: ["books"],
-    priority: "default",
+    tags: errors.length ? ["warning", "books"] : ["books"],
+    priority: status === STATUS_FAILED ? "high" : "default",
+    sourceSummary,
   };
 }
 
-async function handleChildFailure(children, todayISO, err, context) {
-  console.error(`FAILED (${context}):`, err);
-  if (err.screenshotPath) console.error(`Diagnostic screenshot saved: ${err.screenshotPath}`);
-  for (const child of children) {
-    await recordDay({ childId: child.id, date: todayISO, status: STATUS_FAILED, error: String(err?.message || err) });
-  }
-  await sendFailureAlert(err, context);
-}
-
-main().catch(async (err) => {
-  console.error("Unhandled top-level failure:", err);
-  await sendFailureAlert(err, "top-level").catch((alertErr) => {
-    console.error("Additionally failed to send the failure alert itself:", alertErr);
+main().catch(async (error) => {
+  console.error("Unhandled top-level failure:", error);
+  await sendFailureAlert(error, "top-level").catch((alertError) => {
+    console.error("Additionally failed to send the failure alert:", alertError.message);
   });
   process.exitCode = 1;
 });

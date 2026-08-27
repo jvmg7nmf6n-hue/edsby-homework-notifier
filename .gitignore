@@ -1,11 +1,14 @@
 node_modules/
 .env
+.env.*
+!.env.example
 diagnostics/
-
-# Playwright browser binaries / local caches (installed fresh in CI each run)
+gmail-oauth*.json
 /ms-playwright/
 .cache/
-
-# Generated dashboard output -- rebuilt fresh by the workflow every run and
-# deployed via the Pages artifact, never committed to the branch.
 docs/index.html
+/dashboard-*.png
+
+# Legacy plaintext state must never be recommitted.
+data/history.json
+data/notified.json

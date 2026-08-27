@@ -3,7 +3,7 @@
 //
 // VERIFICATION STATUS, kept honest and current:
 //   - loginToEdsby(): selectors LIVE-VERIFIED 2026-08-25 against a real
-//     logged-out session on headstart.edsby.com (see git history for the
+//     logged-out session on the configured Edsby tenant (see git history for the
 //     fix this replaced -- the first version guessed a "click a Login-ish
 //     link" step that turned out to also match the page's own "Log in using
 //     Google" link, which is exactly the class of bug this note exists to
@@ -32,20 +32,17 @@ export class EdsbySelectorError extends Error {
   }
 }
 
-// Screenshots are safe to upload as CI artifacts as-is: a browser always
-// renders `type="password"` as masked dots regardless of the real value, so
-// a screenshot can never visually leak EDSBY_PASSWORD. The email address may
-// be visible on-screen (lower sensitivity than a password, and it's the
-// user's own account email, not a third-party secret) -- disclosed in the
-// README rather than hidden. Written to `diagnostics/` (gitignored, never
-// committed -- only ever picked up by the workflow's own artifact-upload
-// step for that single run).
+// Diagnostics are opt-in and kept local. A screenshot can contain student
+// names, assignments, and email addresses even when the password field itself
+// is masked, so public-repository workflows must not upload it automatically.
 async function saveDiagnosticScreenshot(page, label) {
-  if (!page || page.isClosed()) return null;
+  if (process.env.SAVE_DIAGNOSTICS !== "true" || !page || page.isClosed()) return null;
   try {
     const { mkdir } = await import("node:fs/promises");
     await mkdir("diagnostics", { recursive: true });
     const path = `diagnostics/${label}-${Date.now()}.png`;
+    await page.locator('input[type="password"]').fill("").catch(() => {});
+    await page.locator('input[name="login-userid"]').fill("<redacted>").catch(() => {});
     await page.screenshot({ path, fullPage: true }).catch(() => {});
     return path;
   } catch {
@@ -72,7 +69,7 @@ export async function loginToEdsby() {
 
   try {
     // Live-inspected, confirmed 2026-08-25 (logged-out session against the
-    // real headstart.edsby.com tenant): navigating to the base URL redirects
+    // configured Edsby tenant): navigating to the base URL redirects
     // straight to a single username/password form at /p/BasePublic/ -- no
     // separate marketing/landing page, no district/board picker, no MFA
     // step. An EARLIER version of this function tried to click a "Login"
@@ -152,10 +149,12 @@ export async function loginToEdsby() {
     err.screenshotPath = await saveDiagnosticScreenshot(page, "login-failure");
     await browser.close().catch(() => {});
     if (err.name === "TimeoutError") {
-      throw new EdsbySelectorError(
+      const wrapped = new EdsbySelectorError(
         `Login form was submitted but the page never navigated to /p/BaseParent/... (stayed at ${urlAtFailure}) -- ` +
           "check EDSBY_EMAIL/EDSBY_PASSWORD secrets are correct, or the login flow may have changed."
       );
+      wrapped.screenshotPath = err.screenshotPath;
+      throw wrapped;
     }
     throw err;
   }
@@ -243,9 +242,16 @@ export async function scrapeChildHomeworkRange(page, child, { fromISO, toISO, ma
       const visible = await olderButton.first().isVisible().catch(() => false);
       if (!visible) break;
 
+      const previousTail = await page.locator("body").innerText().then((text) => text.slice(-600)).catch(() => "");
       await olderButton.first().click();
-      await page.waitForTimeout(800); // let the virtualized feed render the newly-loaded batch
-      await page.waitForLoadState("networkidle", { timeout: 5_000 }).catch(() => {});
+      await page
+        .waitForFunction(
+          (tail) => (document.body?.innerText || "").slice(-600) !== tail,
+          previousTail,
+          { timeout: 3_000 }
+        )
+        .catch(() => {});
+      await page.waitForTimeout(100);
       clicks++;
     }
     if (!olderButtonEverFound && clicks === 0) {
@@ -305,7 +311,16 @@ async function collectVisibleCards(page, seen) {
 
     const key = `${subject}|${dateISO}|${cardText.slice(0, 120)}`;
     if (!seen.has(key)) {
-      seen.set(key, { subject, dateISO, rawDateText, topics, toDo, attachments, rawExcerpt: cardText.slice(0, 400) });
+      seen.set(key, {
+        source: "edsby",
+        subject,
+        dateISO,
+        rawDateText,
+        topics,
+        toDo,
+        attachments: attachments.sort(),
+        rawExcerpt: cardText.slice(0, 400),
+      });
     }
   }
 }
@@ -348,7 +363,7 @@ function extractRawDateText(cardText) {
 // never be meaningfully after "now"), fall back to the previous year
 // instead, so a year-less date encountered deep in the feed's history isn't
 // silently mis-stamped onto the current year either.
-function parseEdsbyDate(cardText) {
+export function parseEdsbyDate(cardText, now = new Date()) {
   const raw = extractRawDateText(cardText);
   if (raw === null) return null;
   if (/\b\d{4}\b/.test(raw)) {
@@ -362,7 +377,6 @@ function parseEdsbyDate(cardText) {
     return Number.isNaN(parsed2.getTime()) ? null : karachiISODate(parsed2);
   }
 
-  const now = new Date();
   const currentYear = Number(karachiISODate(now).slice(0, 4));
   let firstParseAttempted = null;
   for (const year of [currentYear, currentYear - 1]) {

@@ -6,13 +6,17 @@
   "type": "module",
   "scripts": {
     "check": "node scripts/run.js",
-    "check:dry": "DRY_RUN=true node scripts/run.js",
-    "backfill": "node scripts/backfill.js"
+    "check:dry": "node scripts/run.js --dry-run",
+    "backfill": "node scripts/backfill.js",
+    "gmail:connect": "node --env-file=.env scripts/gmailAuthorize.js",
+    "migrate:state": "node --env-file=.env scripts/migrateLegacyState.js",
+    "test": "node --test",
+    "lint": "node scripts/validate.js"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
-    "playwright": "^1.47.0"
+    "playwright": "^1.62.1"
   }
 }
