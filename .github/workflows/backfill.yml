@@ -1,46 +1,63 @@
-name: Edsby Homework Backfill Digest
-
-# One-off, manual-only: sends ONE consolidated ntfy push covering a date
-# range (not just "today"). Never runs on a schedule -- workflow_dispatch
-# only, with explicit from/to dates.
+name: School Progress Backfill
 
 on:
   workflow_dispatch:
     inputs:
       from_date:
-        description: "Start date, YYYY-MM-DD (Asia/Karachi calendar date)"
+        description: "Start date (YYYY-MM-DD, maximum 31 days)"
         required: true
       to_date:
-        description: "End date, YYYY-MM-DD (defaults to today if left blank)"
+        description: "End date (YYYY-MM-DD; defaults to today)"
         required: false
       dry_run:
-        description: "Dry run (print the ntfy payload instead of sending it)"
+        description: "Fetch real sources but do not send notifications"
         type: boolean
         default: false
 
+concurrency:
+  group: school-monitor-state
+  cancel-in-progress: false
+
 permissions:
-  contents: write # to commit data/notified.json (backfill uses its own dedupe key)
+  contents: write
 
 jobs:
   backfill:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
 
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: npm
 
-      - name: Install dependencies
-        run: npm ci || npm install
+      - run: npm ci
 
       - name: Install Playwright Chromium
+        if: ${{ vars.EDSBY_ENABLED != 'false' }}
         run: npx playwright install --with-deps chromium
 
-      - name: Run backfill digest
+      - name: Run backfill
         env:
+          EDSBY_ENABLED: ${{ vars.EDSBY_ENABLED || 'true' }}
+          EDSBY_CONFIG_JSON: ${{ secrets.EDSBY_CONFIG_JSON }}
+          EDSBY_BASE_URL: ${{ secrets.EDSBY_BASE_URL }}
+          EDSBY_PARENT_HOME_URL: ${{ secrets.EDSBY_PARENT_HOME_URL }}
+          EDSBY_CHILDREN_JSON: ${{ secrets.EDSBY_CHILDREN_JSON }}
           EDSBY_EMAIL: ${{ secrets.EDSBY_EMAIL }}
           EDSBY_PASSWORD: ${{ secrets.EDSBY_PASSWORD }}
+          GMAIL_ENABLED: ${{ vars.GMAIL_ENABLED || 'false' }}
+          GMAIL_ACCOUNT_EMAIL: ${{ secrets.GMAIL_ACCOUNT_EMAIL }}
+          GMAIL_CLIENT_ID: ${{ secrets.GMAIL_CLIENT_ID }}
+          GMAIL_CLIENT_SECRET: ${{ secrets.GMAIL_CLIENT_SECRET }}
+          GMAIL_REFRESH_TOKEN: ${{ secrets.GMAIL_REFRESH_TOKEN }}
+          GMAIL_QUERY: ${{ secrets.GMAIL_QUERY }}
+          GMAIL_CHILD_ID: ${{ secrets.GMAIL_CHILD_ID }}
+          DATA_ENCRYPTION_KEY: ${{ secrets.DATA_ENCRYPTION_KEY || secrets.NTFY_TOPIC }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           NTFY_SERVER: ${{ secrets.NTFY_SERVER }}
           NTFY_ALERTS_TOPIC: ${{ secrets.NTFY_ALERTS_TOPIC }}
@@ -49,20 +66,15 @@ jobs:
           TO_DATE: ${{ github.event.inputs.to_date }}
         run: npm run backfill
 
-      - name: Upload failure screenshot (if any)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: backfill-failure-diagnostics
-          path: diagnostics/
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: Commit updated dedupe data
+      - name: Commit encrypted state
         if: always()
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/notified.json
-          git diff --cached --quiet || git commit -m "Update backfill dedupe data [skip ci]"
-          git push
+          if [ -f data/state.enc.json ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add data/state.enc.json
+            git diff --cached --quiet || git commit -m "Update encrypted backfill state [skip ci]"
+            git pull --rebase origin "${GITHUB_REF_NAME}"
+            git push
+          fi
+
