@@ -57,6 +57,31 @@
       "cards": [],
       "error": null,
       "updatedAt": "2026-08-26T12:26:19.706Z"
+    },
+    "2026-08-27": {
+      "status": "ok",
+      "cards": [
+        {
+          "subject": "Unknown subject",
+          "dateISO": "2026-08-27",
+          "rawDateText": "Aug 27",
+          "topics": "Library lesson today: Students were given their anchor books for the term \"Hatchet\"",
+          "toDo": "Please write down the notes for diary entry on your Language notebooks.",
+          "attachments": [],
+          "rawExcerpt": "Topics Covered\n\nLibrary lesson today: Students were given their anchor books for the term \"Hatchet\" \n\nTo Do\n\nPlease write down the notes for diary entry on your Language notebooks. \n\nDate:\nAug 27"
+        },
+        {
+          "subject": "Unknown subject",
+          "dateISO": "2026-08-27",
+          "rawDateText": "Aug 27",
+          "topics": "Exercise 5B textbook D1 page 120",
+          "toDo": "Workbook D1 page 45 question no 7 and 8.",
+          "attachments": [],
+          "rawExcerpt": "Topics Covered\n\nExercise 5B textbook D1 page 120\n\n \n\nTo Do\n\nWorkbook D1 page 45 question no 7 and 8.\n\nDate:\nAug 27"
+        }
+      ],
+      "error": null,
+      "updatedAt": "2026-08-27T12:14:42.824Z"
     }
   }
 }
