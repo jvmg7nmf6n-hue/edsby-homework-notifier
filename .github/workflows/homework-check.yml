@@ -1,89 +1,94 @@
-name: Edsby Homework Check
+name: School Progress Check
 
 on:
   schedule:
-    # 12:00 UTC == 17:00 Asia/Karachi (UTC+5, no DST) every day EXCEPT
-    # Saturday (day 6 is deliberately absent from this list) -- the
-    # weekday/Sunday branch itself is still decided inside run.js off the
-    # real Asia/Karachi calendar date, this cron entry only controls when
-    # the job fires at all.
+    # 12:00 UTC = 17:00 Asia/Karachi. Saturday is intentionally excluded.
     - cron: "0 12 * * 0,1,2,3,4,5"
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Dry run (print the ntfy payload instead of sending it)"
+        description: "Fetch real sources but do not send notifications"
         type: boolean
         default: false
 
 concurrency:
-  group: edsby-homework-check
+  group: school-monitor-state
   cancel-in-progress: false
 
 permissions:
-  contents: write # to commit data/*.json (dedupe log + history) back
-  pages: write # to deploy the dashboard
-  id-token: write # required by actions/deploy-pages
+  contents: write
+  pages: write
+  id-token: write
 
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # A GitHub "rerun" otherwise checks out the old event SHA and its
+          # state commit can be rejected after master has advanced.
+          ref: ${{ github.ref_name }}
 
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: npm
 
       - name: Install dependencies
-        run: npm ci || npm install
+        run: npm ci
 
       - name: Install Playwright Chromium
+        if: ${{ vars.EDSBY_ENABLED != 'false' }}
         run: npx playwright install --with-deps chromium
 
-      - name: Run homework check
+      - name: Run school check
         env:
+          EDSBY_ENABLED: ${{ vars.EDSBY_ENABLED || 'true' }}
+          EDSBY_CONFIG_JSON: ${{ secrets.EDSBY_CONFIG_JSON }}
+          EDSBY_BASE_URL: ${{ secrets.EDSBY_BASE_URL }}
+          EDSBY_PARENT_HOME_URL: ${{ secrets.EDSBY_PARENT_HOME_URL }}
+          EDSBY_CHILDREN_JSON: ${{ secrets.EDSBY_CHILDREN_JSON }}
           EDSBY_EMAIL: ${{ secrets.EDSBY_EMAIL }}
           EDSBY_PASSWORD: ${{ secrets.EDSBY_PASSWORD }}
+          GMAIL_ENABLED: ${{ vars.GMAIL_ENABLED || 'false' }}
+          GMAIL_ACCOUNT_EMAIL: ${{ secrets.GMAIL_ACCOUNT_EMAIL }}
+          GMAIL_CLIENT_ID: ${{ secrets.GMAIL_CLIENT_ID }}
+          GMAIL_CLIENT_SECRET: ${{ secrets.GMAIL_CLIENT_SECRET }}
+          GMAIL_REFRESH_TOKEN: ${{ secrets.GMAIL_REFRESH_TOKEN }}
+          GMAIL_QUERY: ${{ secrets.GMAIL_QUERY }}
+          GMAIL_CHILD_ID: ${{ secrets.GMAIL_CHILD_ID }}
+          DATA_ENCRYPTION_KEY: ${{ secrets.DATA_ENCRYPTION_KEY || secrets.NTFY_TOPIC }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           NTFY_SERVER: ${{ secrets.NTFY_SERVER }}
           NTFY_ALERTS_TOPIC: ${{ secrets.NTFY_ALERTS_TOPIC }}
           DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
         run: npm run check
 
-      - name: Upload failure screenshot (if any)
-        # NOT if: failure() -- a check failure (bad login/selector) is caught
-        # and handled inside run.js itself (so the ntfy alert can fire and
-        # the dashboard/history commit can still happen), so the job step
-        # normally reports success even when a screenshot WAS saved. Always
-        # attempt the upload; if-no-files-found: ignore makes this a no-op
-        # on a genuinely clean run.
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: failure-diagnostics
-          path: diagnostics/
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: Commit updated dedupe/history data
+      - name: Commit encrypted state
         if: always()
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/notified.json data/history.json
-          git diff --cached --quiet || git commit -m "Update homework check data [skip ci]"
-          git push
+          if [ -f data/state.enc.json ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add data/state.enc.json
+            git diff --cached --quiet || git commit -m "Update encrypted monitor state [skip ci]"
+            git pull --rebase origin "${GITHUB_REF_NAME}"
+            git push
+          fi
 
-      - name: Upload Pages artifact
-        if: always()
+      - name: Upload encrypted Pages artifact
+        if: always() && hashFiles('docs/index.html') != ''
         uses: actions/upload-pages-artifact@v3
         with:
           path: docs
 
-      - name: Deploy to GitHub Pages
-        if: always()
+      - name: Deploy encrypted dashboard
+        if: always() && hashFiles('docs/index.html') != ''
         id: deployment
         uses: actions/deploy-pages@v4
+
