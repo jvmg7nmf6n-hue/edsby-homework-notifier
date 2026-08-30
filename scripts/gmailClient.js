@@ -65,9 +65,49 @@ function cleanText(value, maxLength = 500) {
     .slice(0, maxLength);
 }
 
+function senderEmail(sender) {
+  const bracketed = String(sender || "").match(/<([^<>\s]+@[^<>\s]+)>/);
+  const bare = String(sender || "").match(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i);
+  return (bracketed?.[1] || bare?.[0] || "").toLowerCase();
+}
+
+function senderDomain(sender) {
+  return senderEmail(sender).split("@")[1] || "";
+}
+
+export function isAllowedSchoolSender(sender, allowedDomains) {
+  const domain = senderDomain(sender);
+  return allowedDomains.some((allowed) => domain === allowed || domain.endsWith(`.${allowed}`));
+}
+
+export function parseEdsbyNotificationSubject(subject) {
+  const match = cleanText(subject, 240).match(/^Edsby Notification:\s*(.+?)\s+in\s+(.+)$/i);
+  return match ? { teacher: match[1].trim(), course: match[2].trim() } : { teacher: "", course: "" };
+}
+
+function edsbyUpdateType(snippet) {
+  const match = cleanText(snippet, 800).match(/\b(made a new post|posted a journal entry|posted an assignment|updated a post|posted)\b/i);
+  if (!match) return "New Edsby update — open Edsby for the complete details.";
+  const label = match[1].charAt(0).toUpperCase() + match[1].slice(1).toLowerCase();
+  return `${label} — open Edsby for the complete details.`;
+}
+
+export function cleanSchoolSnippet(snippet, { isEdsbyNotification = false } = {}) {
+  if (isEdsbyNotification) return edsbyUpdateType(snippet);
+  const withoutFooter = String(snippet || "").split(
+    /Click here to view this notification in Edsby|To Log in to Edsby|Your Edsby server address is:|Unsubscribe|View this email in your browser/i
+  )[0];
+  return cleanText(withoutFooter, 500)
+    .replace(/^Hi\s+[^,]{1,80},\s*/i, "")
+    .replace(/^Dear\s+(Parents?|Parents?\s*\/\s*Guardians?|Guardians?),?\s*/i, "")
+    .trim();
+}
+
 export function gmailMessageToCard(message) {
   const subject = cleanText(header(message, "Subject"), 180) || "School email";
   const sender = cleanText(header(message, "From"), 180) || "Unknown sender";
+  const parsedEdsby = parseEdsbyNotificationSubject(subject);
+  const isEdsbyNotification = Boolean(parsedEdsby.course);
   const timestamp = Number(message.internalDate);
   const receivedAt = Number.isFinite(timestamp) ? new Date(timestamp) : new Date(header(message, "Date"));
   if (Number.isNaN(receivedAt.getTime())) throw new Error(`Gmail message ${message.id} has no valid date`);
@@ -75,8 +115,13 @@ export function gmailMessageToCard(message) {
     source: "gmail",
     sourceId: message.id,
     subject,
-    topics: `Email from ${sender}`,
-    toDo: cleanText(message.snippet, 500),
+    sender,
+    senderEmail: senderEmail(sender),
+    teacher: parsedEdsby.teacher,
+    course: parsedEdsby.course,
+    updateType: isEdsbyNotification ? edsbyUpdateType(message.snippet) : "",
+    topics: "",
+    toDo: cleanSchoolSnippet(message.snippet, { isEdsbyNotification }),
     attachments: [],
     dateISO: karachiISODate(receivedAt),
     receivedAt: receivedAt.toISOString(),
@@ -122,6 +167,8 @@ export async function fetchSchoolEmails({ fromISO, toISO }) {
 
   return messages
     .map(gmailMessageToCard)
+    .filter((card) => isAllowedSchoolSender(card.sender, config.gmail.schoolDomains))
     .filter((card) => card.dateISO >= fromISO && card.dateISO <= toISO)
-    .sort((a, b) => a.receivedAt.localeCompare(b.receivedAt));
+    .sort((a, b) => a.receivedAt.localeCompare(b.receivedAt))
+    .map((card, sequence) => ({ ...card, sequence }));
 }
