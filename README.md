@@ -11,7 +11,10 @@ This project is not affiliated with Edsby, Google, a school, or ntfy. Edsby scra
 - ntfy calls have timeouts, bounded retries, safe header handling, and payload-size protection.
 - Daily and backfill state writes share one concurrency group, start from the latest branch tip, and rebase before pushing to prevent stale-workflow `fetch first` failures.
 - Gmail queries are limited by both the configured school filter and the current Karachi day; message fetches use bounded concurrency.
-- The manual Saturday path no longer performs an accidental school scrape.
+- Gmail sender domains are allowlisted, identical emails are collapsed, and school emails keep earliest-received-first order.
+- Edsby cards are enriched with course/teacher metadata from the card context and a private course directory.
+- Every notification item is numbered; repetitive Edsby login boilerplate is removed.
+- New-item checks run every 15 minutes during daytime hours, while a complete daily synthesis is sent at 17:00 Asia/Karachi.
 - Personal child IDs, names, tenant URLs, and account addresses moved from code to GitHub Secrets.
 - History and dedupe state are AES-256-GCM encrypted before being committed.
 - The GitHub Pages dashboard contains ciphertext only and is decrypted locally after entering the dashboard key.
@@ -43,7 +46,9 @@ Create these repository **Secrets** under Settings → Secrets and variables →
 | `GMAIL_CLIENT_ID` / `GMAIL_CLIENT_SECRET` | when Gmail enabled | Google Cloud Desktop OAuth client |
 | `GMAIL_REFRESH_TOKEN` | when Gmail enabled | Read-only offline OAuth grant |
 | `GMAIL_QUERY` | when Gmail enabled | Restricts which school messages are considered |
+| `GMAIL_SCHOOL_DOMAINS` | when Gmail enabled | Comma-separated sender-domain allowlist applied after Gmail search |
 | `GMAIL_CHILD_ID` | optional | Target child; defaults to the first configured child |
+| `SCHOOL_COURSES_JSON` | recommended | Private course/teacher/keyword directory used to enrich Edsby cards |
 
 Create these repository **Variables**:
 
@@ -70,7 +75,7 @@ Do not put a Gmail password or app password in this project. Use a Google Cloud 
 5. Set `GMAIL_QUERY` as a Secret. Start narrowly, preferably with a known sender or school domain, for example:
 
    ```text
-   {from:(school.example) label:school} {homework assignment announcement progress report}
+   {from:(school.example) from:(school.edsby.com)}
    ```
 
 The automation adds strict current-day timestamps to that query. It stores only message subject, sender, short Gmail snippet, timestamp, and a Gmail link—not full message bodies or attachments.
@@ -104,9 +109,8 @@ Then run **School Progress Check** manually in GitHub Actions with `dry_run` ena
 
 ## Automation behavior
 
-- Monday–Friday at 17:00 Asia/Karachi: Edsby and enabled Gmail checks.
-- Sunday at 17:00: one deduplicated pending-work reminder; no source scrape.
-- Saturday: not scheduled. A manual Saturday run also performs reminder-only behavior.
+- Every 15 minutes from approximately 07:07–18:52 Asia/Karachi: collect Edsby and Gmail, and notify only genuinely new/changed items.
+- Every day at 17:00 Asia/Karachi: send one complete numbered synthesis of the day's school notices and homework.
 - Manual backfill: maximum 31 days, with one consolidated digest.
 - Same-day edits generate a new notification because deduplication hashes normalized content, not only the date.
 - If all sources fail, the dashboard records a failure and ntfy receives a high-priority warning. If one source works, the status is **partial**.
