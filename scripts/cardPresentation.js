@@ -12,6 +12,17 @@ function normalizedCourse(value) {
   return normalized(value).replace(/^grade\s+/, "");
 }
 
+function courseSubject(value) {
+  return text(value).replace(/^\d{1,2}\s*[-–]\s*[A-Z]\s+/i, "") || "course";
+}
+
+function clarifySchoolMaterials(value, course) {
+  const subject = courseSubject(course);
+  return text(value)
+    .replace(/\byour textbook\b/gi, `the ${subject} textbook (exact title not stated in the Edsby post)`)
+    .replace(/\bcomplete Workbook pages\b/g, `complete ${subject} workbook pages`);
+}
+
 export function cardFingerprint(card) {
   const payload = card.source === "gmail"
     ? [card.source, card.dateISO, card.senderEmail, card.subject, card.toDo]
@@ -93,7 +104,7 @@ export function formatCardLines(card, number) {
   if (card.source === "edsby") {
     const lines = [`${number}. [Edsby] ${text(card.course || card.subject)} — ${text(card.teacher)}`];
     if (card.topics) lines.push(`   Concepts: ${text(card.topics)}`);
-    if (card.toDo) lines.push(`   Homework: ${text(card.toDo)}`);
+    if (card.toDo) lines.push(`   Homework: ${clarifySchoolMaterials(card.toDo, card.course || card.subject)}`);
     if (card.attachments?.length) lines.push(`   Attachments: ${[...new Set(card.attachments)].join(", ")}`);
     return lines;
   }
@@ -121,4 +132,3 @@ export function formatCardsByDate(cards, prettyDate) {
   }
   return lines;
 }
-
