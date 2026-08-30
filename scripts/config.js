@@ -25,6 +25,22 @@ function integer(name, fallback, { min, max }) {
   return parsed;
 }
 
+function csv(name) {
+  return required(name).split(",").map((value) => value.trim().toLowerCase()).filter(Boolean);
+}
+
+function jsonArray(name, fallback = []) {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  try {
+    const value = JSON.parse(raw);
+    if (!Array.isArray(value)) throw new Error("must be a JSON array");
+    return value;
+  } catch (error) {
+    throw new Error(`${name} must be a valid JSON array: ${error.message}`);
+  }
+}
+
 let childrenCache;
 let edsbyPrivateCache;
 function edsbyPrivate() {
@@ -112,12 +128,32 @@ export const config = {
     get query() {
       return required("GMAIL_QUERY");
     },
+    get schoolDomains() {
+      return csv("GMAIL_SCHOOL_DOMAINS");
+    },
     get childId() {
       return process.env.GMAIL_CHILD_ID?.trim() || children()[0].id;
     },
     get maxMessages() {
       return integer("GMAIL_MAX_MESSAGES", 25, { min: 1, max: 50 });
     },
+  },
+  get schoolCourses() {
+    return jsonArray("SCHOOL_COURSES_JSON").map((entry, index) => {
+      if (!String(entry?.course || "").trim() || !String(entry?.teacher || "").trim()) {
+        throw new Error(`SCHOOL_COURSES_JSON[${index}] requires course and teacher`);
+      }
+      return {
+        course: String(entry.course).trim(),
+        teacher: String(entry.teacher).trim(),
+        keywords: Array.isArray(entry.keywords) ? entry.keywords.map(String) : [],
+      };
+    });
+  },
+  get runMode() {
+    const mode = process.env.RUN_MODE?.trim().toLowerCase() || "digest";
+    if (!["digest", "realtime"].includes(mode)) throw new Error("RUN_MODE must be digest or realtime");
+    return mode;
   },
   ntfy: {
     get server() {
