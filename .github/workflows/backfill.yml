@@ -56,7 +56,9 @@ jobs:
           GMAIL_CLIENT_SECRET: ${{ secrets.GMAIL_CLIENT_SECRET }}
           GMAIL_REFRESH_TOKEN: ${{ secrets.GMAIL_REFRESH_TOKEN }}
           GMAIL_QUERY: ${{ secrets.GMAIL_QUERY }}
+          GMAIL_SCHOOL_DOMAINS: ${{ secrets.GMAIL_SCHOOL_DOMAINS }}
           GMAIL_CHILD_ID: ${{ secrets.GMAIL_CHILD_ID }}
+          SCHOOL_COURSES_JSON: ${{ secrets.SCHOOL_COURSES_JSON }}
           DATA_ENCRYPTION_KEY: ${{ secrets.DATA_ENCRYPTION_KEY || secrets.NTFY_TOPIC }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           NTFY_SERVER: ${{ secrets.NTFY_SERVER }}
@@ -77,4 +79,3 @@ jobs:
             git pull --rebase origin "${GITHUB_REF_NAME}"
             git push
           fi
-
