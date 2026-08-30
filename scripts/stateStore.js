@@ -18,7 +18,7 @@ function encryptionKey() {
 }
 
 function emptyState() {
-  return { version: 1, history: {}, notified: {} };
+  return { version: 1, history: {}, notified: {}, seenCards: {} };
 }
 
 function bytesToBase64(bytes) {
@@ -80,6 +80,7 @@ export async function getState() {
   }
   cachedState.history ||= {};
   cachedState.notified ||= {};
+  cachedState.seenCards ||= {};
   return cachedState;
 }
 
