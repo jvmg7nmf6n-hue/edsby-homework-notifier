@@ -3,14 +3,14 @@ import { karachiISODate, karachiPretty, karachiWeekday } from "./karachiTime.js"
 import { loginToEdsby, scrapeChildHomework } from "./edsbyClient.js";
 import { fetchSchoolEmails } from "./gmailClient.js";
 import { sendFailureAlert, sendNtfy } from "./ntfy.js";
-import { checkSent, recordSent } from "./dedupe.js";
+import { checkNewCards, checkSent, recordSeenCards, recordSent } from "./dedupe.js";
+import { cardFingerprint, formatCardLines, prepareCards } from "./cardPresentation.js";
 import {
   recordDay,
   STATUS_FAILED,
   STATUS_NONE,
   STATUS_OK,
   STATUS_PARTIAL,
-  STATUS_SKIPPED,
 } from "./history.js";
 import { generateDashboard } from "./dashboard.js";
 import { getState, saveState } from "./stateStore.js";
@@ -20,19 +20,22 @@ function cleanCard(card) {
     source: card.source || "edsby",
     sourceId: card.sourceId || undefined,
     subject: String(card.subject || "Unknown subject").trim(),
+    course: String(card.course || "").trim() || undefined,
+    teacher: String(card.teacher || "").trim() || undefined,
+    senderEmail: String(card.senderEmail || "").trim() || undefined,
     topics: String(card.topics || "").trim(),
     toDo: String(card.toDo || "").trim(),
     attachments: [...new Set(card.attachments || [])].sort(),
     dateISO: card.dateISO || null,
     receivedAt: card.receivedAt || undefined,
+    sequence: Number.isFinite(card.sequence) ? card.sequence : undefined,
+    duplicateCount: Number(card.duplicateCount || 1),
     url: card.url || undefined,
   };
 }
 
 function stableCards(cards) {
-  return cards.map(cleanCard).sort((a, b) =>
-    [a.dateISO, a.source, a.subject, a.toDo].join("|").localeCompare([b.dateISO, b.source, b.subject, b.toDo].join("|"))
-  );
+  return prepareCards(cards, config.schoolCourses).map(cleanCard);
 }
 
 async function main() {
@@ -42,15 +45,9 @@ async function main() {
   await getState(); // fail early if the encrypted state key is missing/wrong
   let sourceIssues = false;
 
-  console.log(`Run starting. Asia/Karachi date: ${todayISO} (${weekday}). dry_run=${isDryRun()}`);
+  console.log(`Run starting. Asia/Karachi date: ${todayISO} (${weekday}). mode=${config.runMode} dry_run=${isDryRun()}`);
   try {
-    if (weekday === "Sunday") {
-      await runReminderDay(children, todayISO, "Sunday");
-    } else if (weekday === "Saturday") {
-      await runReminderDay(children, todayISO, "Saturday");
-    } else {
-      sourceIssues = await runFullCheck(children, todayISO);
-    }
+    sourceIssues = await runFullCheck(children, todayISO);
   } finally {
     await saveState();
     await generateDashboard();
@@ -59,22 +56,6 @@ async function main() {
   if (sourceIssues) {
     console.error("One or more configured sources failed; results were saved as partial/failed.");
     process.exitCode = 2;
-  }
-}
-
-async function runReminderDay(children, todayISO, weekday) {
-  for (const child of children) {
-    const payload = { status: STATUS_SKIPPED, weekday };
-    const dedupe = await checkSent({ childId: child.id, date: todayISO, payload });
-    await recordDay({ childId: child.id, date: todayISO, status: STATUS_SKIPPED });
-    if (dedupe.alreadySent) continue;
-    await sendNtfy({
-      title: `Homework reminder (${weekday})`,
-      body: "Please review pending homework and upcoming school notices together.",
-      clickUrl: config.edsby.parentHomeUrl,
-      tags: ["books"],
-    });
-    if (!isDryRun()) await recordSent(dedupe);
   }
 }
 
@@ -154,30 +135,45 @@ async function finishChild(outcome, todayISO) {
   const payload = { status, cards, errors: outcome.errors.map((error) => error.message) };
 
   await recordDay({ childId: outcome.child.id, date: todayISO, status, cards, errors: outcome.errors });
-  const dedupe = await checkSent({ childId: outcome.child.id, date: todayISO, payload });
+  if (config.runMode === "realtime") {
+    const fresh = await checkNewCards({ childId: outcome.child.id, date: todayISO, cards, fingerprint: cardFingerprint });
+    if (!fresh.newCards.length && !outcome.errors.length) {
+      console.log(`${outcome.child.name}: no new school items since the previous realtime check.`);
+      return;
+    }
+    const realtimePayload = { status, cards: fresh.newCards, errors: payload.errors };
+    const errorDedupe = await checkSent({ childId: outcome.child.id, date: `realtime:${todayISO}`, payload: realtimePayload });
+    if (errorDedupe.alreadySent) return;
+    await sendNtfy(buildNotification(outcome.child, todayISO, status, fresh.newCards, outcome.errors, "realtime"));
+    if (!isDryRun()) {
+      await recordSeenCards(fresh);
+      await recordSent(errorDedupe);
+    }
+    return;
+  }
+
+  const dedupe = await checkSent({ childId: outcome.child.id, date: `digest:${todayISO}`, payload });
   if (dedupe.alreadySent) {
     console.log(`${outcome.child.name}: identical ${todayISO} update already sent.`);
     return;
   }
 
-  await sendNtfy(buildNotification(outcome.child, todayISO, status, cards, outcome.errors));
-  if (!isDryRun()) await recordSent(dedupe);
+  await sendNtfy(buildNotification(outcome.child, todayISO, status, cards, outcome.errors, "digest"));
+  if (!isDryRun()) {
+    await recordSent(dedupe);
+    const seen = await checkNewCards({ childId: outcome.child.id, date: todayISO, cards, fingerprint: cardFingerprint });
+    await recordSeenCards(seen);
+  }
 }
 
-export function buildNotification(child, todayISO, status, cards, errors = []) {
+export function buildNotification(child, todayISO, status, cards, errors = [], mode = "digest") {
   const pretty = karachiPretty(new Date(`${todayISO}T00:00:00Z`));
   const sourceSummary = [...new Set(cards.map((card) => card.source))].join(" + ");
   const body = [];
   if (status === STATUS_FAILED) body.push("No school data could be collected.");
   else if (!cards.length) body.push("No new matching homework, progress, or announcement items were found.");
   else {
-    for (const card of cards) {
-      body.push(`[${card.source === "gmail" ? "Gmail" : "Edsby"}] ${card.subject}`);
-      if (card.topics) body.push(`  ${card.topics}`);
-      if (card.toDo) body.push(`  ${card.toDo}`);
-      if (card.attachments?.length) body.push(`  Attachments: ${card.attachments.join(", ")}`);
-      body.push("");
-    }
+    cards.forEach((card, index) => body.push(...formatCardLines(card, index + 1), ""));
   }
   if (errors.length) {
     body.push("Partial check warning:");
@@ -187,7 +183,9 @@ export function buildNotification(child, todayISO, status, cards, errors = []) {
     title:
       status === STATUS_FAILED
         ? `School check failed (${pretty})`
-        : `${child.name} — ${cards.length} school update${cards.length === 1 ? "" : "s"} (${pretty})`,
+        : mode === "realtime"
+          ? `${child.name} — ${cards.length} new school update${cards.length === 1 ? "" : "s"}`
+          : `${child.name} — daily school digest (${pretty})`,
     body: body.join("\n").trim(),
     clickUrl: child.dashboardUrl,
     tags: errors.length ? ["warning", "books"] : ["books"],
