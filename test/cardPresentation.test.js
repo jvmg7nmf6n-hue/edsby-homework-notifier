@@ -60,3 +60,13 @@ test("Gmail messages are ordered earliest first and every item is numbered", () 
   assert.match(formatCardLines(cards[1], 2)[0], /^2\. \[Gmail\]/);
 });
 
+test("generic textbook wording is clarified without inventing a title", () => {
+  const lines = formatCardLines({
+    source: "edsby",
+    course: "7-K Science",
+    teacher: "Ms Maham Javaid",
+    toDo: "Revise the concepts from your textbook and complete Workbook pages 5, 6 and 7.",
+  }, 1);
+  assert.match(lines[1], /Science textbook \(exact title not stated in the Edsby post\)/);
+  assert.match(lines[1], /complete Science workbook pages 5, 6 and 7/);
+});
