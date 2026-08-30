@@ -5,6 +5,7 @@ import { fetchSchoolEmails } from "./gmailClient.js";
 import { sendFailureAlert, sendNtfy } from "./ntfy.js";
 import { checkSent, recordSent } from "./dedupe.js";
 import { getState, saveState } from "./stateStore.js";
+import { formatCardsByDate, prepareCards } from "./cardPresentation.js";
 
 const FROM_DATE = process.env.FROM_DATE;
 const TO_DATE = process.env.TO_DATE || karachiISODate();
@@ -26,6 +27,7 @@ async function main() {
 
   let edsbySession = null;
   let edsbyLoginError = null;
+  let sourceIssues = false;
   if (config.edsby.enabled) {
     try {
       edsbySession = await loginToEdsby();
@@ -36,11 +38,15 @@ async function main() {
 
   try {
     for (const child of config.edsby.children) {
-      await backfillOneChild(edsbySession?.page, edsbyLoginError, child);
+      sourceIssues = (await backfillOneChild(edsbySession?.page, edsbyLoginError, child)) || sourceIssues;
     }
   } finally {
     if (edsbySession) await edsbySession.browser.close().catch(() => {});
     await saveState();
+  }
+  if (sourceIssues) {
+    console.error("One or more configured sources failed during backfill.");
+    process.exitCode = 2;
   }
 }
 
@@ -81,33 +87,27 @@ async function backfillOneChild(page, loginError, child) {
 
   if (!successfulSources && errors.length) {
     await sendFailureAlert(new Error(errors.map((error) => error.message).join("; ")), `backfill (${child.name})`);
-    return;
+    return true;
   }
 
-  cards.sort((a, b) => [a.dateISO, a.source, a.subject].join("|").localeCompare([b.dateISO, b.source, b.subject].join("|")));
-  const payload = { cards, errors: errors.map((error) => error.message) };
+  const preparedCards = prepareCards(cards, config.schoolCourses);
+  console.log(`${child.name}: prepared ${preparedCards.length} unique school item(s) after enrichment and duplicate removal.`);
+  const payload = { cards: preparedCards, errors: errors.map((error) => error.message) };
   const dedupe = await checkSent({ childId: child.id, date: `backfill:${FROM_DATE}:${TO_DATE}`, payload });
   if (dedupe.alreadySent) {
     console.log(`${child.name}: identical digest already sent.`);
-    return;
+    return errors.length > 0;
   }
-  await sendNtfy(buildDigestNotification(child, cards, errors));
+  await sendNtfy(buildDigestNotification(child, preparedCards, errors));
   if (!isDryRun()) await recordSent(dedupe);
+  return errors.length > 0;
 }
 
-function buildDigestNotification(child, cards, errors) {
+export function buildDigestNotification(child, cards, errors) {
   const fromPretty = karachiPretty(new Date(`${FROM_DATE}T00:00:00Z`));
   const toPretty = karachiPretty(new Date(`${TO_DATE}T00:00:00Z`));
   const lines = cards.length ? [] : [`No matching school updates found for ${fromPretty} through ${toPretty}.`];
-  let activeDate = "";
-  for (const card of cards) {
-    if (card.dateISO !== activeDate) {
-      activeDate = card.dateISO;
-      lines.push("", prettyDate(card.dateISO));
-    }
-    lines.push(`[${card.source === "gmail" ? "Gmail" : "Edsby"}] ${card.subject}`);
-    if (card.toDo) lines.push(`  ${card.toDo}`);
-  }
+  if (cards.length) lines.push(...formatCardsByDate(cards, prettyDate));
   if (errors.length) {
     lines.push("", "Partial check warning:", ...errors.map((error) => `- ${error.message}`));
   }
