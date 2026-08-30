@@ -304,7 +304,8 @@ async function collectVisibleCards(page, seen) {
     const cardText = (await card.innerText().catch(() => "")) || "";
     const rawDateText = extractRawDateText(cardText);
     const dateISO = parseEdsbyDate(cardText);
-    const subject = extractSubject(cardText);
+    const metadata = extractEdsbyMetadata(cardText);
+    const subject = metadata.course || "Unknown subject";
     const topics = extractSection(cardText, /topics covered/i);
     const toDo = extractSection(cardText, /to ?do/i);
     const attachments = await extractAttachmentNames(card);
@@ -314,6 +315,9 @@ async function collectVisibleCards(page, seen) {
       seen.set(key, {
         source: "edsby",
         subject,
+        course: metadata.course,
+        teacher: metadata.teacher,
+        sequence: seen.size,
         dateISO,
         rawDateText,
         topics,
@@ -329,7 +333,8 @@ async function collectVisibleCards(page, seen) {
  * contains a plausible subject heading -- a generic "find the enclosing
  * card" without assuming a fixed DOM depth or class name. */
 async function nearestCardContainer(dateLabelLocator) {
-  for (let depth = 1; depth <= 6; depth++) {
+  let fallback = null;
+  for (let depth = 1; depth <= 10; depth++) {
     const ancestor = dateLabelLocator.locator(`xpath=ancestor::*[${depth}]`);
     const count = await ancestor.count().catch(() => 0);
     if (!count) continue;
@@ -337,11 +342,14 @@ async function nearestCardContainer(dateLabelLocator) {
     // Heuristic: a real card is long enough to plausibly contain a subject
     // name plus the Date: line, but short enough not to be the whole feed
     // (which would swallow every card into one "container").
-    if (text.length > 20 && text.length < 4000) {
-      return ancestor.first();
+    if (text.length > 20 && text.length < 8000) {
+      const dateCount = await ancestor.first().getByText(/^date:/i).count().catch(() => 0);
+      if (dateCount !== 1) continue;
+      fallback ||= ancestor.first();
+      if (extractEdsbyMetadata(text).course) return ancestor.first();
     }
   }
-  return null;
+  return fallback;
 }
 
 function extractRawDateText(cardText) {
@@ -407,20 +415,24 @@ export function parseEdsbyDate(cardText, now = new Date()) {
 // plausible-looking wrong answer. Re-check with the diagnostic logging in
 // backfill.js after this fix -- if "Unknown subject" shows up often, the
 // container-selection heuristic itself needs live-verified adjustment.
-const KNOWN_SECTION_HEADERS = /^(topics covered|to ?do|date:|attachments?)$/i;
+const KNOWN_SECTION_HEADERS = /^(topics covered|to ?do|date:|attachments?)\b/i;
+const TEACHER_PATTERN = /\b(Ms\.?|Mrs\.?|Mr\.?|Miss|Sir)\s+[A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){0,3}\b/;
+const COURSE_PATTERN = /\b\d{1,2}\s*[-–]\s*[A-Z]\b\s*[-–:]?\s*[A-Za-z][A-Za-z &/-]{2,80}/i;
 
-function extractSubject(cardText) {
-  const lines = cardText.split("\n").map((l) => l.trim()).filter(Boolean);
-  if (!lines.length) return "Unknown subject";
-  const firstHeaderIdx = lines.findIndex((l) => KNOWN_SECTION_HEADERS.test(l));
-  // Only trust the first line if it appears BEFORE any known section
-  // header. If the very first non-empty line already IS a header (the
-  // real, confirmed 2026-08-25 case), there is genuinely no subject-looking
-  // line in this captured text at all, and grabbing whatever comes next
-  // would just mislabel real topics/to-do CONTENT as if it were a subject
-  // name -- worse than admitting we don't know.
-  if (firstHeaderIdx === 0) return "Unknown subject";
-  return lines[0];
+export function extractEdsbyMetadata(cardText) {
+  const lines = String(cardText || "").split("\n").map((line) => line.replace(/\s+/g, " ").trim()).filter(Boolean);
+  const teacher = lines.map((line) => line.match(TEACHER_PATTERN)?.[0] || "").find(Boolean) || "";
+  const directCourse = lines.map((line) => line.match(COURSE_PATTERN)?.[0] || "").find(Boolean) || "";
+  if (directCourse) return { course: directCourse.trim(), teacher };
+
+  const firstSection = lines.findIndex((line) => KNOWN_SECTION_HEADERS.test(line));
+  const headingLines = firstSection >= 0 ? lines.slice(0, firstSection) : lines.slice(0, 5);
+  const course = headingLines
+    .filter((line) => !TEACHER_PATTERN.test(line))
+    .filter((line) => !/^(recent activity|posted|journal entry|assignment)$/i.test(line))
+    .filter((line) => line.length >= 3 && line.length <= 120)
+    .at(-1) || "";
+  return { course, teacher };
 }
 
 function extractSection(cardText, headingPattern) {
