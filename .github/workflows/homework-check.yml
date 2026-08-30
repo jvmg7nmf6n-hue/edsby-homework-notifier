@@ -2,10 +2,19 @@ name: School Progress Check
 
 on:
   schedule:
-    # 12:00 UTC = 17:00 Asia/Karachi. Saturday is intentionally excluded.
-    - cron: "0 12 * * 0,1,2,3,4,5"
+    # Near-real-time checks every 15 minutes, 07:07-18:52 Asia/Karachi.
+    - cron: "7-59/15 2-13 * * *"
+    # Full daily synthesis at 17:00 Asia/Karachi, including weekends.
+    - cron: "0 12 * * *"
   workflow_dispatch:
     inputs:
+      mode:
+        description: "Notification mode"
+        type: choice
+        options:
+          - digest
+          - realtime
+        default: digest
       dry_run:
         description: "Fetch real sources but do not send notifications"
         type: boolean
@@ -61,12 +70,15 @@ jobs:
           GMAIL_CLIENT_SECRET: ${{ secrets.GMAIL_CLIENT_SECRET }}
           GMAIL_REFRESH_TOKEN: ${{ secrets.GMAIL_REFRESH_TOKEN }}
           GMAIL_QUERY: ${{ secrets.GMAIL_QUERY }}
+          GMAIL_SCHOOL_DOMAINS: ${{ secrets.GMAIL_SCHOOL_DOMAINS }}
           GMAIL_CHILD_ID: ${{ secrets.GMAIL_CHILD_ID }}
+          SCHOOL_COURSES_JSON: ${{ secrets.SCHOOL_COURSES_JSON }}
           DATA_ENCRYPTION_KEY: ${{ secrets.DATA_ENCRYPTION_KEY || secrets.NTFY_TOPIC }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           NTFY_SERVER: ${{ secrets.NTFY_SERVER }}
           NTFY_ALERTS_TOPIC: ${{ secrets.NTFY_ALERTS_TOPIC }}
           DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          RUN_MODE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.mode || (github.event.schedule == '0 12 * * *' && 'digest' || 'realtime') }}
         run: npm run check
 
       - name: Commit encrypted state
@@ -91,4 +103,3 @@ jobs:
         if: always() && hashFiles('docs/index.html') != ''
         id: deployment
         uses: actions/deploy-pages@v4
-
